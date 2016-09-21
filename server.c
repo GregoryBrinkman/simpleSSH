@@ -1,3 +1,7 @@
+#define _XOPEN_SOURCE 600
+
+#include <termios.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -9,7 +13,6 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-#define _XOPEN_SOURCE 600
 #define PORT 4070
 #define BUFFSIZE 4096
 #define REMBASH "<rembash>\n"
@@ -17,8 +20,10 @@
 #define ERROR "<error>\n"
 #define OK "<ok>\n"
 
+struct termios tty;
 void handle_client(int);
 void accepted_client(int);
+pid_t getpty(int*, const struct termios*, const struct winsize*);
 
 int main(int argc, char *argv[])
 {
@@ -51,9 +56,10 @@ int main(int argc, char *argv[])
   client_len = sizeof(client_address);
   while(1) {
     client_sockfd = accept(server_sockfd, (struct sockaddr *)&client_address, &client_len);
-    
+
     if(client_sockfd != -1)
-      if(fork() == 0) handle_client(client_sockfd);
+      if(fork() == 0)
+        handle_client(client_sockfd);
     close(client_sockfd);
   }
 }
@@ -80,22 +86,78 @@ void accepted_client(int connect_fd)
   /* int i = 0; */
   /* while(i < 3) dup2(connect_fd, i++); */
   /* execlp("bash", "bash", NULL); */
-  int masterfd, slavefd;
-  char *slavename;
 
-  masterfd = posix_openpt(O_RDWR|O_NOCTTY); 
+  struct winsize ws;
+  
+  //if this doesn't work, have info sent through socket or something?
+  //grab terminal info from socket
 
-  if (masterfd == -1 || grantpt(masterfd) == -1
-      || unlockpt(masterfd) == -1 || (slavename = ptsname(masterfd)) == NULL){
-    close(masterfd);
+  /* if(tcgetattr(connect_fd, &tty) == -1){ */
+  /*   perror("tcgetattr"); */
+  /*   close(connect_fd); */
+  /*   exit(EXIT_FAILURE); */
+  /* } */
+  /* if(ioctl(connect_fd, TIOCGWINSZ, &ws) < 0){ */
+  /*   perror("Error determining window size"); */
+  /*   close(connect_fd); */
+  /*   exit(EXIT_FAILURE); */
+  /* } */
+
+  int masterfd;
+
+  if(getpty(&masterfd, &tty, &ws) == -1)
     exit(EXIT_FAILURE);
-  }
-  if(fork() == 0){
-    close(masterfd);
-    if(setsid() == -1)
-      exit(EXIT_FAILURE);
-    if((slavefd = open(slavename, O_RDWR)) < 0)
-      exit(EXIT_FAILURE);
+
+  /* dup2(masterfd, connect_fd); */
+  /* while(1){ */
+  /* } */
+
+  ttySetRaw(&tty);
+
+
+}
+
+pid_t getpty(int *masterfd, const struct termios *tty,
+             const struct winsize *ws){
+  char* slavename;
+  pid_t pid;
+  int mfd, slavefd;
+  mfd = posix_openpt(O_RDWR|O_NOCTTY); 
+
+  if (mfd == -1 || grantpt(mfd) == -1 || unlockpt(mfd) == -1 || (slavename = ptsname(mfd)) == NULL){
+    close(mfd);
+    return -1;
   }
 
+  //child
+  if((pid = fork()) == 0){
+
+    close(mfd);
+    if(setsid() == -1)
+      return -1;
+
+    if((slavefd = open(slavename, O_RDWR)) < 0)
+      return -1;
+
+    if(tcsetattr(slavefd, TCSANOW, tty) == -1)
+      return -1;
+
+    if(ioctl(slavefd, TIOCSWINSZ, ws) == -1)
+      return -1;
+
+    int i = 0;
+    while(i < 3)
+      if(dup2(slavefd, i) == i)
+        i++;
+      else
+        return -1;
+
+    execlp("bash", "bash", NULL);
+    //something went wrong if we're here
+    return -1;
+  }
+
+  //parent
+  *masterfd = mfd;
+  return pid;
 }
