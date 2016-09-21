@@ -1,3 +1,4 @@
+#include <termios.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <stdio.h>
@@ -22,6 +23,7 @@
 
 void error(const char *);
 void sigchld_handler(int);
+int ttySetup(int, struct termios *);
 
 int main(int argc, char *argv[])
 {
@@ -114,13 +116,21 @@ int main(int argc, char *argv[])
     perror("Signal Handler Construction Failed");
     exit(EXIT_FAILURE);
   }
-  
+  //setup terminal 
+  struct termios prevTerm;
+  if(ttySetup(1, &prevTerm) == -1)
+    {
+      tcsetattr(1, TCSAFLUSH, &prevTerm);
+      close(sockfd);
+      error("tcsetattr broke");
+    }
 
 #ifdef DEBUG
   printf("%d\n", i++);
 #endif
-
-  int cpid, nwrite, total;
+  
+  int cpid;
+  /* int nwrite, total; */
   switch(cpid = fork()) {
   case -1: //error
     perror("Fork failed");
@@ -130,30 +140,40 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
     printf("%d\n", i++);
 #endif
-
-    nwrite = 0;
-    while(nwrite != -1 && (len = read(0, &buff, BUFFSIZE)) > 0){
-      total = 0;
-      do{
-        if((nwrite = write(sockfd, buff+total, len-total)) == -1) break;
-      }while((total += nwrite) < len);
+    while(1){
+      if(read(0, buff, 1) <= 0) break;
+      if(write(sockfd, buff, 1) <= 0) break;
     }
-    if(errno)
-      perror("Client: Error during read/write from stdin to shell");
-    else
-      fprintf(stderr, "Client: Connection closed prematurely");
-    close(sockfd);
-    exit(EXIT_FAILURE);
+    exit(0);
   }
-  //parent: writer
-  nwrite = 0;
-  while(nwrite != -1 && (len = read(sockfd, &buff, BUFFSIZE)) > 0){
-    total = 0;
-    do{
-      if((nwrite = write(1, buff+total, len-total)) == -1) break;
-    }while((total += nwrite) < len);
+  while(1){
+    if(read(sockfd, buff, 1) <= 0) break;
+    if(write(1, buff, 1) <= 0) break;
   }
+  /*   nwrite = 0; */
+  /*   while(nwrite != -1 && (len = read(0, &buff, BUFFSIZE)) > 0){ */
+  /*     total = 0; */
+  /*     do{ */
+  /*       if((nwrite = write(sockfd, buff+total, len-total)) == -1) break; */
+  /*     }while((total += nwrite) < len); */
+  /*   } */
+  /*   if(errno) */
+  /*     perror("Client: Error during read/write from stdin to shell"); */
+  /*   else */
+  /*     fprintf(stderr, "Client: Connection closed prematurely"); */
+  /*   close(sockfd); */
+  /*   exit(EXIT_FAILURE); */
+  /* } */
+  /* //parent: writer */
+  /* nwrite = 0; */
+  /* while(nwrite != -1 && (len = read(sockfd, &buff, BUFFSIZE)) > 0){ */
+  /*   total = 0; */
+  /*   do{ */
+  /*     if((nwrite = write(1, buff+total, len-total)) == -1) break; */
+  /*   }while((total += nwrite) < len); */
+  /* } */
   close(sockfd);
+  tcsetattr(1, TCSAFLUSH, &prevTerm);
   act.sa_handler = SIG_IGN;
   if(sigaction(SIGCHLD, &act, NULL) == -1)
     perror("Client: Error setting SIGCHLD to be ignored");
@@ -171,5 +191,22 @@ void error(const char* err_msg)
 void sigchld_handler(int signal)
 {
   wait(NULL);
-  exit(EXIT_FAILURE);
+   exit(EXIT_FAILURE);
+}
+
+int ttySetup(int fd, struct termios *prevTerm)
+{
+  struct termios t;
+
+  if(tcgetattr(fd, &t) == -1)
+    return -1;
+
+  if(prevTerm != NULL)
+  *prevTerm = t;
+
+  t.c_lflag &= ~(ICANON|IEXTEN);
+
+  if(tcsetattr(fd, TCSAFLUSH, &t) == -1)
+    return -1;
+  return 0;
 }

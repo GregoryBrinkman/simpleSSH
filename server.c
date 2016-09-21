@@ -1,6 +1,7 @@
 #define _XOPEN_SOURCE 600
 
 #include <termios.h>
+#include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -8,9 +9,10 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
+#include <linux/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netinet/in.h>
 #include <stdlib.h>
 
 #define PORT 4070
@@ -21,9 +23,10 @@
 #define OK "<ok>\n"
 
 struct termios tty;
+void sigchld_handler(int);
 void handle_client(int);
 void accepted_client(int);
-pid_t getpty(int*, const struct termios*, const struct winsize*);
+pid_t getpty(int*, const struct termios*/* , const struct winsize* */);
 
 int main(int argc, char *argv[])
 {
@@ -33,10 +36,15 @@ int main(int argc, char *argv[])
   struct sockaddr_in server_address;
   struct sockaddr_in client_address;
 
+
   if((server_sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1){
     perror("Socket Failed");
     exit(1);
   }
+  int i = 1;
+  setsockopt(server_sockfd, IPPROTO_TCP, TCP_NODELAY, (char *) &i, sizeof(int));
+  //disable Nagle's algorithm
+
   server_address.sin_family = AF_INET;
   server_address.sin_addr.s_addr = htonl(INADDR_ANY);
   server_address.sin_port = htons(PORT);
@@ -83,42 +91,51 @@ void handle_client(int connect_fd){
 
 void accepted_client(int connect_fd)
 {
-  /* int i = 0; */
-  /* while(i < 3) dup2(connect_fd, i++); */
-  /* execlp("bash", "bash", NULL); */
-
-  struct winsize ws;
-  
-  //if this doesn't work, have info sent through socket or something?
-  //grab terminal info from socket
-
-  /* if(tcgetattr(connect_fd, &tty) == -1){ */
-  /*   perror("tcgetattr"); */
-  /*   close(connect_fd); */
-  /*   exit(EXIT_FAILURE); */
-  /* } */
-  /* if(ioctl(connect_fd, TIOCGWINSZ, &ws) < 0){ */
-  /*   perror("Error determining window size"); */
-  /*   close(connect_fd); */
-  /*   exit(EXIT_FAILURE); */
-  /* } */
-
+  /* struct winsize ws; */
   int masterfd;
 
-  if(getpty(&masterfd, &tty, &ws) == -1)
+  //signal handler
+  struct sigaction act;
+  act.sa_handler = sigchld_handler;
+  act.sa_flags = 0;
+  sigemptyset(&act.sa_mask);
+  if(sigaction(SIGCHLD, &act,NULL) == -1) {
+    perror("Signal Handler Construction Failed");
+    exit(EXIT_FAILURE);
+  }
+  pid_t cpid, pid;
+  if((cpid = getpty(&masterfd, &tty/*, &ws */)) == -1)
     exit(EXIT_FAILURE);
 
-  /* dup2(masterfd, connect_fd); */
-  /* while(1){ */
-  /* } */
+  char buff[1];
+  if((pid = fork()) == 0){
+    while(1){
+      if(read(connect_fd, buff, 1) <= 0) break;
+      if(write(masterfd, buff, 1) <= 0) break;
+    }
+    exit(0);
+  }
+  while(1){
+    if(read(masterfd, buff,1) <= 0) break;
+    if(write(connect_fd, buff, 1) <= 0) break;
+  }
 
-  ttySetRaw(&tty);
+  close(connect_fd);
+  close(masterfd);
+  kill(pid, SIGTERM);
+  kill(cpid, SIGTERM);
+
+  act.sa_handler = SIG_IGN;
+  if(sigaction(SIGCHLD, &act, NULL) == -1)
+    perror("Client: Error setting SIGCHLD to be ignored");
+
+  exit(0);
 
 
 }
 
-pid_t getpty(int *masterfd, const struct termios *tty,
-             const struct winsize *ws){
+pid_t getpty(int *masterfd, const struct termios *tty){
+  /* ,const struct winsize *ws){ */
   char* slavename;
   pid_t pid;
   int mfd, slavefd;
@@ -142,8 +159,8 @@ pid_t getpty(int *masterfd, const struct termios *tty,
     if(tcsetattr(slavefd, TCSANOW, tty) == -1)
       return -1;
 
-    if(ioctl(slavefd, TIOCSWINSZ, ws) == -1)
-      return -1;
+    /* if(ioctl(slavefd, TIOCSWINSZ, ws) == -1) */
+    /*   return -1; */
 
     int i = 0;
     while(i < 3)
@@ -160,4 +177,10 @@ pid_t getpty(int *masterfd, const struct termios *tty,
   //parent
   *masterfd = mfd;
   return pid;
+}
+
+void sigchld_handler(int signal)
+{
+  wait(NULL);
+  exit(EXIT_FAILURE);
 }
