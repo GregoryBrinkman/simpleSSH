@@ -19,23 +19,17 @@
 #define OK "<ok>\n"
 #define EXIT "exit\n"
 
-#define DEBUG
-
 void error(const char *);
 void sigchld_handler(int);
 int ttySetup(int, struct termios *);
+
+pid_t cpid;
 
 int main(int argc, char *argv[])
 {
   int sockfd, len;
   struct sockaddr_in address;
   static char buff[BUFFSIZE];
-
-#ifdef DEBUG
-  int i;
-  i=1;
-  printf("%d\n", i++);
-#endif
 
   if(argc != 2) error("USAGE: program IP-ADDRESS");
 
@@ -50,19 +44,10 @@ int main(int argc, char *argv[])
   address.sin_port = htons(PORT);
   inet_aton(tmp, &address.sin_addr);
 
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-
   if(connect(sockfd, (struct sockaddr *)&address, sizeof(address)) == -1){
     perror("Connection refused");
     exit(EXIT_FAILURE);
   }
-
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-
 
   len = strlen(REMBASH);
   if(read(sockfd, &buff, len) != len){
@@ -70,20 +55,10 @@ int main(int argc, char *argv[])
     error("Read Failed");
   }
 
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-
-
   if(strcmp(buff, REMBASH) != 0){
     close(sockfd);
     error("Rembash Protocol Failed");
   }
-
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-
 
   len = strlen(SECRET);
   if(write(sockfd, &SECRET, len) != len){
@@ -92,20 +67,10 @@ int main(int argc, char *argv[])
   }
   read(sockfd, &buff, BUFFSIZE);
 
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-
-
   if(0 != strncmp(buff, OK, strlen(OK))){
     close(sockfd);
     error("Wrong Secret");
   }
-
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-
 
   //signal handler
   struct sigaction act;
@@ -116,6 +81,7 @@ int main(int argc, char *argv[])
     perror("Signal Handler Construction Failed");
     exit(EXIT_FAILURE);
   }
+
   //setup terminal 
   struct termios prevTerm;
   if(ttySetup(1, &prevTerm) == -1)
@@ -125,11 +91,6 @@ int main(int argc, char *argv[])
       error("tcsetattr broke");
     }
 
-#ifdef DEBUG
-  printf("%d\n", i++);
-#endif
-  
-  int cpid;
   /* int nwrite, total; */
   switch(cpid = fork()) {
   case -1: //error
@@ -137,47 +98,28 @@ int main(int argc, char *argv[])
     exit(EXIT_FAILURE);
   case 0: //child: reader
 
-#ifdef DEBUG
-    printf("%d\n", i++);
-#endif
     while(1){
       if(read(0, buff, 1) <= 0) break;
       if(write(sockfd, buff, 1) <= 0) break;
     }
-    exit(0);
+    exit(EXIT_FAILURE);
   }
-  while(1){
-    if(read(sockfd, buff, 1) <= 0) break;
-    if(write(1, buff, 1) <= 0) break;
+
+  /* parent: writer */
+  int nwrite, total;
+  nwrite = 0;
+  while(nwrite != -1 && (len = read(sockfd, &buff, BUFFSIZE)) > 0){
+    total = 0;
+    do{
+      if((nwrite = write(1, buff+total, len-total)) == -1) break;
+    }while((total += nwrite) < len);
   }
-  /*   nwrite = 0; */
-  /*   while(nwrite != -1 && (len = read(0, &buff, BUFFSIZE)) > 0){ */
-  /*     total = 0; */
-  /*     do{ */
-  /*       if((nwrite = write(sockfd, buff+total, len-total)) == -1) break; */
-  /*     }while((total += nwrite) < len); */
-  /*   } */
-  /*   if(errno) */
-  /*     perror("Client: Error during read/write from stdin to shell"); */
-  /*   else */
-  /*     fprintf(stderr, "Client: Connection closed prematurely"); */
-  /*   close(sockfd); */
-  /*   exit(EXIT_FAILURE); */
-  /* } */
-  /* //parent: writer */
-  /* nwrite = 0; */
-  /* while(nwrite != -1 && (len = read(sockfd, &buff, BUFFSIZE)) > 0){ */
-  /*   total = 0; */
-  /*   do{ */
-  /*     if((nwrite = write(1, buff+total, len-total)) == -1) break; */
-  /*   }while((total += nwrite) < len); */
-  /* } */
+
   close(sockfd);
   tcsetattr(1, TCSAFLUSH, &prevTerm);
   act.sa_handler = SIG_IGN;
   if(sigaction(SIGCHLD, &act, NULL) == -1)
     perror("Client: Error setting SIGCHLD to be ignored");
-  kill(cpid, SIGTERM);
 
   return 0;
 }
@@ -191,7 +133,8 @@ void error(const char* err_msg)
 void sigchld_handler(int signal)
 {
   wait(NULL);
-   exit(EXIT_FAILURE);
+  kill(cpid, SIGTERM);
+  exit(EXIT_FAILURE);
 }
 
 int ttySetup(int fd, struct termios *prevTerm)

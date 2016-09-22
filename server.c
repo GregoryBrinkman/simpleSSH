@@ -21,12 +21,17 @@
 #define SECRET "<cs407rembash>\n"
 #define ERROR "<error>\n"
 #define OK "<ok>\n"
+#define DEBUG
+
+int i = 0;
+int j = 0;
+int cpid[5];
 
 struct termios tty;
 void sigchld_handler(int);
 void handle_client(int);
 void accepted_client(int);
-pid_t getpty(int*, const struct termios*/* , const struct winsize* */);
+pid_t getpty(int*, const struct termios* /* , const struct winsize* */);
 
 int main(int argc, char *argv[])
 {
@@ -41,9 +46,10 @@ int main(int argc, char *argv[])
     perror("Socket Failed");
     exit(1);
   }
+
+  //disable Nagle's algorithm
   int i = 1;
   setsockopt(server_sockfd, IPPROTO_TCP, TCP_NODELAY, (char *) &i, sizeof(int));
-  //disable Nagle's algorithm
 
   server_address.sin_family = AF_INET;
   server_address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -73,7 +79,8 @@ int main(int argc, char *argv[])
 }
 
 void handle_client(int connect_fd){
-  static char buff[BUFFSIZE];
+  char buff[BUFFSIZE];
+  memset(buff, 0, BUFFSIZE);
 
   write(connect_fd, &REMBASH, strlen(REMBASH));
   read(connect_fd, &buff, strlen(SECRET));
@@ -94,6 +101,10 @@ void accepted_client(int connect_fd)
   /* struct winsize ws; */
   int masterfd;
 
+#ifdef DEBUG
+  printf("accepted client\n");
+#endif
+
   //signal handler
   struct sigaction act;
   act.sa_handler = sigchld_handler;
@@ -103,41 +114,60 @@ void accepted_client(int connect_fd)
     perror("Signal Handler Construction Failed");
     exit(EXIT_FAILURE);
   }
-  pid_t cpid, pid;
-  if((cpid = getpty(&masterfd, &tty/*, &ws */)) == -1)
+
+  if((cpid[0] = getpty(&masterfd, &tty/*, &ws */)) == -1)
     exit(EXIT_FAILURE);
 
-  char buff[1];
+  char buff[BUFFSIZE];
+  pid_t pid;
   if((pid = fork()) == 0){
     while(1){
-      if(read(connect_fd, buff, 1) <= 0) break;
-      if(write(masterfd, buff, 1) <= 0) break;
+      if(read(connect_fd, &buff, 1) != 1) break;
+      if(write(masterfd, &buff, 1) != 1) break;
+
+#ifdef DEBUG
+      printf("Child wrote %c from sock to master\n", buff[0]);
+#endif
+
     }
     exit(0);
   }
+  cpid[1]=pid;
+
+#ifdef DEBUG
+  printf("PID of child socketreader: %d\n", (int)pid);
+#endif
+
   while(1){
-    if(read(masterfd, buff,1) <= 0) break;
-    if(write(connect_fd, buff, 1) <= 0) break;
+    int nwrite, total, readlen;
+    nwrite = 0;
+    while(nwrite != -1 && (readlen = read(masterfd, &buff, BUFFSIZE)) > 0){
+
+#ifdef DEBUG
+      printf("readlen to master:%d, lenwrote to socket:%d\n", readlen, nwrite);
+#endif
+
+      total = 0;
+      do{
+        if((nwrite = write(connect_fd, buff+total, readlen-total)) == -1) break;
+      }while((total += nwrite) < readlen);
+    }
   }
 
   close(connect_fd);
   close(masterfd);
-  kill(pid, SIGTERM);
-  kill(cpid, SIGTERM);
 
   act.sa_handler = SIG_IGN;
   if(sigaction(SIGCHLD, &act, NULL) == -1)
     perror("Client: Error setting SIGCHLD to be ignored");
 
-  exit(0);
-
+  return;
 
 }
 
 pid_t getpty(int *masterfd, const struct termios *tty){
   /* ,const struct winsize *ws){ */
   char* slavename;
-  pid_t pid;
   int mfd, slavefd;
   mfd = posix_openpt(O_RDWR|O_NOCTTY); 
 
@@ -147,7 +177,12 @@ pid_t getpty(int *masterfd, const struct termios *tty){
   }
 
   //child
+  pid_t pid;
   if((pid = fork()) == 0){
+
+#ifdef DEBUG
+    printf("slavename = %s\n", slavename);
+#endif
 
     close(mfd);
     if(setsid() == -1)
@@ -174,6 +209,10 @@ pid_t getpty(int *masterfd, const struct termios *tty){
     return -1;
   }
 
+#ifdef DEBUG
+  printf("slave pid = %d\n", (int)pid);
+#endif
+
   //parent
   *masterfd = mfd;
   return pid;
@@ -181,6 +220,20 @@ pid_t getpty(int *masterfd, const struct termios *tty){
 
 void sigchld_handler(int signal)
 {
+#ifdef DEBUG
+  printf("SIGNAL HIT\n");
+  printf("Children to MURDER: cpid[0]=%d, cpid[1]=%d\n", cpid[0], cpid[1]);
+#endif
+
   wait(NULL);
-  exit(EXIT_FAILURE);
+
+  int x = 0;
+  while(x < 2)
+    kill(cpid[x++], SIGTERM);
+
+#ifdef DEBUG
+  printf("They're dead now, you have to live with what you've done...\n");
+#endif
+  
+  exit(EXIT_SUCCESS);
 }
