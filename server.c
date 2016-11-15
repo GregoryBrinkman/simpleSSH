@@ -24,6 +24,9 @@
 #include <stdlib.h>
 
 //constants
+#define STDIN 0
+#define STDOUT 1
+#define STDERR 2
 #define PORT 4070
 #define BUFFSIZE 4096
 #define REMBASH "<rembash>\n"
@@ -43,7 +46,7 @@ void timer_handler(int, siginfo_t *, void *);
 void *epoll_loop(void*);
 void *handle_client(void*);
 void accepted_client(int);
-pid_t getpty(int*, const struct termios* /* , const struct winsize* */);
+pid_t getpty(int* /*, const struct termios* , const struct winsize* */);
 
 int main(int argc, char *argv[])
 {
@@ -54,6 +57,18 @@ int main(int argc, char *argv[])
   socklen_t server_len, client_len;
   struct sockaddr_in server_address;
   struct sockaddr_in client_address;
+  pthread_attr_t attr;
+
+  //set thread to start in detached mode
+  if(pthread_attr_init(&attr) != 0){
+    perror("pthread attr");
+    exit(EXIT_FAILURE);
+  }
+
+  if(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0){
+    perror("pthread attr setdetachstate");
+    exit(EXIT_FAILURE);
+  }
 
   //epoll setup
   if((epfd = epoll_create1(SOCK_CLOEXEC)) == -1){
@@ -69,7 +84,8 @@ int main(int argc, char *argv[])
 
   //disable Nagle's algorithm
   int i = 1;
-  setsockopt(server_sockfd, IPPROTO_TCP, TCP_NODELAY, (char *) &i, sizeof(int));
+  setsockopt(server_sockfd, IPPROTO_TCP, TCP_NODELAY,
+      (char *) &i, sizeof(int));
 
   //set variables for socket bind to port 4070
   server_address.sin_family = AF_INET;
@@ -77,7 +93,8 @@ int main(int argc, char *argv[])
   server_address.sin_port = htons(PORT);
   server_len = sizeof(server_address);
 
-  if((result = bind(server_sockfd, (struct sockaddr *)&server_address, server_len)) == -1){
+  if((result = bind(server_sockfd, (struct sockaddr *)&server_address,
+          server_len)) == -1){
     perror("Bind refused");
     exit(EXIT_FAILURE);
   }
@@ -93,29 +110,31 @@ int main(int argc, char *argv[])
 
   pthread_t epoll_thread;
   pthread_create(&epoll_thread, NULL, epoll_loop, NULL);
+
   //accept loop
   while(1) {
     client_sockfd = accept4(server_sockfd, (struct sockaddr *)&client_address, &client_len, SOCK_CLOEXEC);
 
     if(client_sockfd != -1)
-      {
-        pthread_t handle_thread;
-        int *fd = malloc(sizeof(int));
-        *fd = client_sockfd;
-        pthread_create(&handle_thread, NULL, handle_client, fd);
+    {
+      pthread_t handle_thread;
+
+      // pass in file descriptor to thread
+      int *fd = malloc(sizeof(int));
+      *fd = client_sockfd;
+
+      //create thread running handle_client in detached mode
+      pthread_create(&handle_thread, &attr, handle_client, fd);
 
 #ifdef DEBUG
-        printf("pthread created: %ld, connect_fd is %i\n", (long) handle_thread, client_sockfd);
+      printf("pthread created: %ld, connect_fd is %i\n", (long) handle_thread, client_sockfd);
 #endif
 
-      }
-    /* pthread_create */
-    /* handle_client(client_sockfd); */
-    /* close(client_sockfd); */
+    }
   }
 }
 
-void *epoll_loop(void *a){
+void *epoll_loop(void *ignored){
   struct epoll_event ev[MAX_NUM_CLIENTS];
   int events, i;
 
@@ -133,38 +152,56 @@ void *epoll_loop(void *a){
     for(i = 0; i < events; i++){
 
       if(ev[i].events & EPOLLIN){
-        
-        #ifdef DEBUG
-        printf("from client: %i, from master: %i", ev[i].data.fd, fd[ev[i].data.fd]);
-        #endif
+
+#ifdef DEBUG
+        printf("from client: %i, from master: %i\n", ev[i].data.fd, fd[ev[i].data.fd]);
+#endif
+
         /* relay data */
         static char buff[BUFFSIZE];
         int nwrite, total, readlen;
         if((readlen = read(ev[i].data.fd, &buff, BUFFSIZE)) > 0){
-
           total = 0;
           do{
             if((nwrite = write(fd[ev[i].data.fd], buff+total, readlen-total)) == -1) break;
           }while((total += nwrite) < readlen);
+        }else{
+
+#ifdef DEBUG
+          if(readlen == 0)
+            printf("Read returned 0; Interrupted client\n");
+          else
+            printf("read returned -1; ERROR");
+          printf("closed client: %i, closed master: %i\n", ev[i].data.fd, fd[ev[i].data.fd]);
+#endif
+
+          //error!
+          close(fd[ev[i].data.fd]);
+          close(ev[i].data.fd);
         }
       }else if(ev[i].events & (EPOLLERR | EPOLLHUP)){
-    /* close fds */
+        /* close fds */
+
+#ifdef DEBUG
+        printf("closed client: %i, closed master: %i\n", ev[i].data.fd, fd[ev[i].data.fd]);
+#endif
+
         close(fd[ev[i].data.fd]);
         close(ev[i].data.fd);
+      }
+    }
+
   }
 }
 
-}
-}
-
 void *handle_client(void * arg){
-  
+
   char buff[BUFFSIZE];
 
   int connect_fd = *(int*)arg;
   free(arg);
 
-  int flag = 1;
+  int timer_flag = 1;
 
 #ifdef DEBUG
   printf("connect_fd = %i\n", connect_fd);
@@ -184,13 +221,13 @@ void *handle_client(void * arg){
   struct sigevent sev;
   sev.sigev_notify = SIGEV_THREAD_ID;
   sev.sigev_signo = SIGRTMAX;
-  
-  sev.sigev_value.sival_ptr = &flag;
+
+  sev.sigev_value.sival_ptr = &timer_flag;
   sev._sigev_un._tid = syscall(SYS_gettid);
 
-
+  //set handshake timer to disconnect after 5 seconds
   struct itimerspec ts;
-  ts.it_value.tv_sec = 2;
+  ts.it_value.tv_sec = 5;
 
   //start timer
   timer_t tid;
@@ -199,28 +236,28 @@ void *handle_client(void * arg){
 
   //handshake
   if(write(connect_fd, &REMBASH, strlen(REMBASH)) == -1)
-    {
-      close(connect_fd);
-      pthread_exit(NULL);
-    }
+  {
+    close(connect_fd);
+    pthread_exit(NULL);
+  }
 
-  if(flag == 0)
-    {
-      close(connect_fd);
-      pthread_exit(NULL);
-    }
+  if(timer_flag == 0)
+  {
+    close(connect_fd);
+    pthread_exit(NULL);
+  }
 
   if(read(connect_fd, &buff, strlen(SECRET)) == -1)
-    {
-      close(connect_fd);
-      pthread_exit(NULL);
-    }
+  {
+    close(connect_fd);
+    pthread_exit(NULL);
+  }
 
-  if(flag == 0)
-    {
-      close(connect_fd);
-      pthread_exit(NULL);
-    }
+  if(timer_flag == 0)
+  {
+    close(connect_fd);
+    pthread_exit(NULL);
+  }
 
   if(0 != strncmp(buff, SECRET, strlen(SECRET))){
     write(connect_fd, &ERROR, strlen(ERROR));
@@ -231,7 +268,7 @@ void *handle_client(void * arg){
   write(connect_fd, &OK, strlen(OK));
   //end timer
   timer_delete(tid);
-  
+
   accepted_client(connect_fd);
   pthread_exit(NULL);
 }
@@ -241,18 +278,17 @@ void accepted_client(int connect_fd)
 {
   /* struct winsize ws; */
   int masterfd;
-  struct termios tty;
   struct epoll_event ev[2];
 
 #ifdef DEBUG
   printf("accepted client\n");
 #endif
 
-  if((getpty(&masterfd, &tty/*, &ws */)) == -1)
+  if((getpty(&masterfd/*, &tty, &ws */)) == -1)
     exit(EXIT_FAILURE);
 #ifdef DEBUG
   printf("At masterSocket epoll handoff");
-  #endif
+#endif
 
   int flags;
   if((flags = fcntl(masterfd, F_GETFL, 0)) == -1){
@@ -276,13 +312,17 @@ void accepted_client(int connect_fd)
 
 }
 
-pid_t getpty(int *masterfd, const struct termios *tty){
+pid_t getpty(int *masterfd){
+  /* , const struct termios *ttyOrigin){ */
   /* ,const struct winsize *ws){ */
+
+  struct termios tty;
   char* slavename;
   int mfd, slavefd;
-  mfd = posix_openpt(O_RDWR|O_CLOEXEC); 
+  mfd = posix_openpt(O_RDWR|O_CLOEXEC);
 
-  if (mfd == -1 || grantpt(mfd) == -1 || unlockpt(mfd) == -1 || (slavename = ptsname(mfd)) == NULL){
+  if (mfd == -1 || grantpt(mfd) == -1 || unlockpt(mfd) == -1 ||
+      (slavename = ptsname(mfd)) == NULL){
     close(mfd);
     return -1;
   }
@@ -295,30 +335,45 @@ pid_t getpty(int *masterfd, const struct termios *tty){
     printf("slavename = %s\n", slavename);
 #endif
 
+    //bash doesn't need this
     close(mfd);
+
+    //set session for pseudoterminal
     if(setsid() == -1)
       return -1;
 
     if((slavefd = open(slavename, O_RDWR)) < 0)
       return -1;
 
-    /* tty->c_lflag &= ~(ICANON|IEXTEN); */
 
-    if(tcsetattr(slavefd, TCSANOW, tty) == -1)
+    tty.c_lflag &= (~ECHO|ECHOK|ECHOE|~ICANON|~ECHOCTL);
+
+    tty.c_iflag &= ~ICRNL;
+
+    tty.c_oflag &= OPOST;
+
+    tty.c_cc[VMIN] = 1;
+    tty.c_cc[VTIME] = 0;
+
+    if(tcsetattr(slavefd, TCSAFLUSH, &tty) == -1)
       return -1;
-
 
     /* if(ioctl(slavefd, TIOCSWINSZ, ws) == -1) */
     /*   return -1; */
 
-    int i = 0;
-    while(i < 3)
-      if(dup2(slavefd, i) == i)
-        i++;
-      else
-        return -1;
+    //redirect I/O to PTY slave
+    if(dup2(slavefd, STDIN) != STDIN)
+      return -1;
 
+    if(dup2(slavefd, STDOUT) != STDOUT)
+      return -1;
+
+    if(dup2(slavefd, STDERR) != STDERR)
+      return -1;
+
+    //execute bash for client
     execlp("bash", "bash", NULL);
+
     //something went wrong if we're here
     return 0;
   }
