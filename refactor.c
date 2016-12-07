@@ -94,7 +94,8 @@ int main(int argc, char *argv[])
   while(1) {
     socklen_t client_len;
     struct sockaddr_in client_address;
-    client_fd = accept4(server_fd, (struct sockaddr *)&client_address, &client_len, SOCK_CLOEXEC);
+    client_fd = accept4(server_fd, (struct sockaddr *)&client_address,
+                        &client_len, SOCK_CLOEXEC);
 
     if(client_fd != -1){
 
@@ -237,6 +238,7 @@ void handle_event(int fd){
   }else{
     /* readwrite */
     if(fd == clientArray[fd].sock){
+      printf("clientArray[fd].sock = %d\n", fd);
       printf("Reading from %d to %d\n", clientArray[fd].sock, clientArray[fd].pty);
       int nwrite, total, readlen;
       if((readlen = read(fd, buff, BUFFSIZE)) > 0){
@@ -246,6 +248,7 @@ void handle_event(int fd){
         }while((total += nwrite) < readlen);
       }else{
 
+        if(errno != EWOULDBLOCK && errno != EAGAIN){
 #ifdef DEBUG
         if(readlen == 0)
           printf("Read returned 0; Interrupted client\n");
@@ -261,9 +264,12 @@ void handle_event(int fd){
         close(clientArray[fd].sock);
         close(clientArray[fd].pty);
         clientArray[fd].state = -1;
+        }
+        return;
       }
     }
     if(fd == clientArray[fd].pty){
+      printf("clientArray[fd].pty = %d\n", fd);
       printf("Reading from %d to %d\n", clientArray[fd].pty, clientArray[fd].sock);
       int nwrite, total, readlen;
       if((readlen = read(fd, buff, BUFFSIZE)) > 0){
@@ -273,6 +279,7 @@ void handle_event(int fd){
         }while((total += nwrite) < readlen);
       }else{
 
+        if(errno != EWOULDBLOCK && errno != EAGAIN){
 #ifdef DEBUG
         if(readlen == 0)
           printf("Read returned 0; Interrupted client\n");
@@ -288,6 +295,8 @@ void handle_event(int fd){
         close(clientArray[fd].sock);
         close(clientArray[fd].pty);
         clientArray[fd].state = -1;
+        }
+        return;
       }
     }
   }
