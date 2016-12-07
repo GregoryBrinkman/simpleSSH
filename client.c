@@ -147,7 +147,9 @@ int ttySetup(int fd, struct termios *prevTerm)
   if(prevTerm != NULL)
   *prevTerm = t;
 
-  t.c_lflag &= ~(ICANON|IEXTEN);
+  t.c_lflag &= ~(ICANON|ECHO);
+  //t.c_cc[VMIN] = 1;
+  //t.c_cc[VTIME] = 0;
 
   if(tcsetattr(fd, TCSAFLUSH, &t) == -1)
     return -1;

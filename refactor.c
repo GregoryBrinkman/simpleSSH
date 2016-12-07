@@ -55,14 +55,11 @@ int socket_init();
 int epoll_init();
 void *epoll_loop(void*);
 void handle_event(int fd);
-
-/* void *handle_client(void*); */
-/* void accepted_client(int); */
-/* pid_t getpty(int* /\*, const struct termios* , const struct winsize* *\/); */
+void accepted_client(int);
+pid_t getpty(int* /*, const struct termios* , const struct winsize* */);
 
 int main(int argc, char *argv[])
 {
-  signal(SIGCHLD, SIG_IGN);
   int server_fd;
   if((server_fd = socket_init()) == 0) {
     fprintf(stderr, "oops! server socket couldn't initialize\n");
@@ -82,17 +79,28 @@ int main(int argc, char *argv[])
   /* } */
 
 
+  if (signal(SIGCHLD, SIG_IGN) == SIG_ERR){
+      perror("Failed to set SIGCHLD to SIG_IGN");
+      exit(EXIT_FAILURE);
+    }
+
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR){
+      perror("Failed to set SIGPIPE to SIG_IGN");
+      exit(EXIT_FAILURE);
+    }
+
   int client_fd;
-  socklen_t client_len;
-  struct sockaddr_in client_address;
   //accept loop
   while(1) {
+    socklen_t client_len;
+    struct sockaddr_in client_address;
     client_fd = accept4(server_fd, (struct sockaddr *)&client_address, &client_len, SOCK_CLOEXEC);
 
     if(client_fd != -1){
 
-      struct epoll_event ev[2];
+      struct epoll_event ev[1];
       clientArray[client_fd].sock = client_fd;
+      clientArray[client_fd].state = 0;
       /* fd[connect_fd] = masterfd; */
 
       ev[0].data.fd = client_fd;
@@ -103,19 +111,11 @@ int main(int argc, char *argv[])
       /* epoll_ctl(epfd, EPOLL_CTL_ADD, masterfd, ev + 1); */
 
 
-      printf("In clientarray at index %d: sock = %d, state = %d\n",client_fd, clientArray[client_fd].sock, clientArray[client_fd].state);
+      /* printf("In clientarray at index %d: sock = %d, state = %d\n",client_fd, clientArray[client_fd].sock, clientArray[client_fd].state); */
 
-      //pthread_t handle_thread;
+      if(write(clientArray[client_fd].sock, REMBASH, strlen(REMBASH)) == -1)
+        close(clientArray[client_fd].sock);
 
-      // pass in file descriptor to thread
-      /* int *fd = malloc(sizeof(int)); */
-      /* *fd = client_fd; */
-
-      //create thread running handle_client in detached mode
-      //pthread_create(&handle_thread, &attr, handle_client, fd);
-      /* if(tpool_add_task(*(int*)fd) == 0) { */
-      /*   fprintf(stderr, "FD could not be added to tpool"); */
-      /* } */
     }
   }
 }
@@ -123,7 +123,7 @@ int main(int argc, char *argv[])
 int epoll_init(){
 
   //epoll setup
-  if((epfd = epoll_create1(SOCK_CLOEXEC)) == -1){
+  if((epfd = epoll_create1(EPOLL_CLOEXEC)) == -1){
     return 0;
   }
 
@@ -179,13 +179,13 @@ int socket_init(){
   return server_sockfd;
 }
 
+
 void *epoll_loop(void *ignored){
   struct epoll_event ev[MAX_NUM_CLIENTS];
   int events, i;
 
   while(1){
     events=epoll_wait(epfd, ev, MAX_NUM_CLIENTS, -1);
-    printf("Epoll got event");
     if(events == -1){
       if(errno == EINTR){
         continue;
@@ -198,10 +198,11 @@ void *epoll_loop(void *ignored){
 
       if(ev[i].events & EPOLLIN){
         tpool_add_task(ev[i].data.fd);
-      }else if(ev[i].events & (EPOLLERR | EPOLLHUP)){
+      }else if(ev[i].events & (EPOLLERR | EPOLLRDHUP | EPOLLHUP)){
         /* close fds */
         close(clientArray[ev[i].data.fd].sock);
-        close(ev[i].data.fd);
+        close(clientArray[ev[i].data.fd].pty);
+        clientArray[ev[i].data.fd].state = -1;
       }
     }
   }
@@ -214,51 +215,188 @@ void handle_event(int fd){
   printf("in handle event");
   char buff[BUFFSIZE];
 
+  /* secret  */
   if(clientArray[fd].state == 0){
-    /* new client */
-    if(write(clientArray[fd].sock, &REMBASH, strlen(REMBASH)) == -1)
-        close(clientArray[fd].sock);
-    else
-      clientArray[fd].state = clientArray[fd].state + 1;
-  }else if(clientArray[fd].state == 1){
-    /* secret  */
-    if(read(clientArray[fd].sock, &buff, strlen(SECRET)) == -1)
+    if(read(clientArray[fd].sock, buff, strlen(SECRET)) == -1)
       {
         close(clientArray[fd].sock);
+        clientArray[fd].state = -1;
         pthread_exit(NULL);
       }
 
     if(0 != strncmp(buff, SECRET, strlen(SECRET))){
-      write(clientArray[fd].sock, &ERROR, strlen(ERROR));
+      write(clientArray[fd].sock, ERROR, strlen(ERROR));
+      clientArray[fd].state = -1;
       close(clientArray[fd].sock);
     }
 
-    write(clientArray[fd].sock, &OK, strlen(OK));
+    write(clientArray[fd].sock, OK, strlen(OK));
 
     clientArray[fd].state = clientArray[fd].state + 1;
-    /* accepted_client(clientArray[fd].sock); */
+    accepted_client(clientArray[fd].sock);
   }else{
     /* readwrite */
+    if(fd == clientArray[fd].sock){
+      printf("Reading from %d to %d\n", clientArray[fd].sock, clientArray[fd].pty);
+      int nwrite, total, readlen;
+      if((readlen = read(fd, buff, BUFFSIZE)) > 0){
+        total = 0;
+        do{
+          if((nwrite = write(clientArray[fd].pty, buff+total, readlen-total)) == -1) break;
+        }while((total += nwrite) < readlen);
+      }else{
 
-    /*     int nwrite, total, readlen; */
-    /*     if((readlen = read(fd, &buff, BUFFSIZE)) > 0){ */
-    /*       total = 0; */
-    /*       do{ */
-    /*         if((nwrite = write(fd[ev[i].data.fd], buff+total, readlen-total)) == -1) break; */
-    /*       }while((total += nwrite) < readlen); */
-    /*     }else{ */
+#ifdef DEBUG
+        if(readlen == 0)
+          printf("Read returned 0; Interrupted client\n");
+        else
+          printf("read returned -1; ERROR");
+        printf("closed client: %i, closed master: %i\n", clientArray[fd].sock, clientArray[fd].pty);
+#endif
 
-    /* #ifdef DEBUG */
-    /*       if(readlen == 0) */
-    /*         printf("Read returned 0; Interrupted client\n"); */
-    /*       else */
-    /*         printf("read returned -1; ERROR"); */
-    /*       printf("closed client: %i, closed master: %i\n", ev[i].data.fd, fd[ev[i].data.fd]); */
-    /* #endif */
+        //error!
+        close(clientArray[clientArray[fd].pty].sock);
+        close(clientArray[clientArray[fd].pty].pty);
+        clientArray[clientArray[fd].pty].state = -1;
+        close(clientArray[fd].sock);
+        close(clientArray[fd].pty);
+        clientArray[fd].state = -1;
+      }
+    }
+    if(fd == clientArray[fd].pty){
+      printf("Reading from %d to %d\n", clientArray[fd].pty, clientArray[fd].sock);
+      int nwrite, total, readlen;
+      if((readlen = read(fd, buff, BUFFSIZE)) > 0){
+        total = 0;
+        do{
+          if((nwrite = write(clientArray[fd].sock, buff+total, readlen-total)) == -1) break;
+        }while((total += nwrite) < readlen);
+      }else{
 
-    /*       //error! */
-    /*       close(fd[ev[i].data.fd]); */
-    /*       close(ev[i].data.fd); */
-    /*     } */
+#ifdef DEBUG
+        if(readlen == 0)
+          printf("Read returned 0; Interrupted client\n");
+        else
+          printf("read returned -1; ERROR");
+        printf("closed client: %i, closed master: %i\n", clientArray[fd].sock, clientArray[fd].pty);
+#endif
+
+        //error!
+        close(clientArray[clientArray[fd].sock].sock);
+        close(clientArray[clientArray[fd].sock].pty);
+        clientArray[clientArray[fd].sock].state = -1;
+        close(clientArray[fd].sock);
+        close(clientArray[fd].pty);
+        clientArray[fd].state = -1;
+      }
+    }
   }
 }
+
+
+
+void accepted_client(int connect_fd)
+{
+  /* struct winsize ws; */
+  int masterfd;
+  struct epoll_event ev[2];
+
+#ifdef DEBUG
+  printf("accepted client\n");
+#endif
+
+  if((getpty(&masterfd/*, &tty, &ws */)) == -1)
+    exit(EXIT_FAILURE);
+#ifdef DEBUG
+  printf("At masterSocket epoll handoff");
+#endif
+
+  int flags;
+  if((flags = fcntl(masterfd, F_GETFL, 0)) == -1){
+    perror("flag error");
+  }
+  flags |=O_NONBLOCK;
+  if((fcntl(masterfd, F_SETFL, flags)) == -1){
+    perror("flag error");
+  }
+
+  clientArray[connect_fd].sock = connect_fd;
+  clientArray[connect_fd].pty = masterfd;
+  clientArray[masterfd].sock = connect_fd;
+  clientArray[masterfd].pty = masterfd;
+  clientArray[masterfd].state = 2;
+
+  ev[0].data.fd = clientArray[connect_fd].sock;
+  ev[1].data.fd = clientArray[connect_fd].pty;
+  ev[0].events = EPOLLIN | EPOLLET;
+  ev[1].events = EPOLLIN | EPOLLET;
+  epoll_ctl(epfd, EPOLL_CTL_ADD, clientArray[connect_fd].sock, ev);
+  epoll_ctl(epfd, EPOLL_CTL_ADD, clientArray[connect_fd].pty, ev + 1);
+
+}
+
+pid_t getpty(int *masterfd){
+  /* , const struct termios *ttyOrigin){ */
+  /* ,const struct winsize *ws){ */
+
+  struct termios tty;
+  char* slavename;
+  int mfd, slavefd;
+  mfd = posix_openpt(O_RDWR|O_CLOEXEC);
+
+  if (mfd == -1 || grantpt(mfd) == -1 || unlockpt(mfd) == -1 ||
+      (slavename = ptsname(mfd)) == NULL){
+    close(mfd);
+    return -1;
+  }
+
+  //child
+  pid_t pid;
+  if((pid = fork()) == 0){
+
+#ifdef DEBUG
+    printf("slavename = %s\n", slavename);
+#endif
+
+    //bash doesn't need this
+    close(mfd);
+
+    //set session for pseudoterminal
+    if(setsid() == -1)
+      return -1;
+
+    if((slavefd = open(slavename, O_RDWR)) < 0)
+      return -1;
+
+
+    if(tcsetattr(slavefd, TCSAFLUSH, &tty) == -1)
+      return -1;
+
+    /* if(ioctl(slavefd, TIOCSWINSZ, ws) == -1) */
+    /*   return -1; */
+
+    //redirect I/O to PTY slave
+    if(dup2(slavefd, STDIN) != STDIN)
+      return -1;
+
+    if(dup2(slavefd, STDOUT) != STDOUT)
+      return -1;
+
+    if(dup2(slavefd, STDERR) != STDERR)
+      return -1;
+
+    //execute bash for client
+    execlp("bash", "bash", NULL);
+
+    //something went wrong if we're here
+    return 0;
+  }
+
+#ifdef DEBUG
+  printf("HIT\n");
+#endif
+  //parent
+  *masterfd = mfd;
+  return pid;
+}
+
