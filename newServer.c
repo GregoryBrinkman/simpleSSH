@@ -40,6 +40,7 @@ struct client
 {
   char* ip;
   char* name;
+  int   fd;
   int   inCall;
 };
 
@@ -52,9 +53,9 @@ int numClients = 0;
 //function declarations
 int save_client(int, char *);
 void *handle_client(void*);
-void accepted_client(int, int);
-void conf_talk(int, int, char*);
-void talk(int, int, char*);
+void accepted_client(int);
+void conf_talk(int, char*);
+void talk(int, char*);
 
 int main(int argc, char *argv[])
 {
@@ -202,7 +203,7 @@ void *handle_client(void * arg){
   // return the index of the newly saved client in 'clients' array
   //
   int clients_num = save_client(connect_fd, buff);
-  accepted_client(clients_num, connect_fd);
+  accepted_client(clients_num);
   pthread_exit(NULL);
 }
 
@@ -222,6 +223,7 @@ int save_client(int fd, char* buff)
   // save client
   //
   clients[numClients].ip = ip;
+  clients[numClients].fd = fd;
   clients[numClients].name = buff;
   clients[numClients].inCall = 0;
   numClients++;
@@ -230,23 +232,23 @@ int save_client(int fd, char* buff)
   return numClients-1;
 }
 
-void accepted_client(int clients_num, int connect_fd)
+void accepted_client(int clients_num)
 {
   char buff[BUFFSIZE];
 
   //
   // Welcome message. Trust me, it's easier this way.
   //
-  write(connect_fd, "Hi, ", 4);
-  write(connect_fd, clients[numClients-1].name, strlen(clients[numClients-1].name));
-  write(connect_fd, "!\n", 2);
+  write(clients[clients_num].fd, "Hi, ", 4);
+  write(clients[clients_num].fd, clients[numClients-1].name, strlen(clients[numClients-1].name));
+  write(clients[clients_num].fd, "!\n", 2);
 
 
   //
   // read client input forever (until 'exit')
   //
   while(1){
-    read(connect_fd, &buff, BUFFSIZE);
+    read(clients[clients_num].fd, &buff, BUFFSIZE);
 
     //
     // parsing newlines and carriage returns
@@ -262,12 +264,12 @@ void accepted_client(int clients_num, int connect_fd)
     //'talk client'
     //
     if(0 == strncmp(buff, TALK, strlen(TALK)))
-      talk(clients_num, connect_fd, buff);
+      talk(clients_num, buff);
     //
     //'conference talk client1 client2'
     //
     if(0 == strncmp(buff, CONF_TALK, strlen(CONF_TALK)))
-      conf_talk(clients_num, connect_fd, buff);
+      conf_talk(clients_num, buff);
     //
     // 'exit'
     //
@@ -276,15 +278,18 @@ void accepted_client(int clients_num, int connect_fd)
   }
 
   //Ya gotta close those files.
-  close(connect_fd);
+  close(clients[clients_num].fd);
 }
 
-void talk(int clients_num, int fd, char* oldBuff){
+void talk(int clients_num, char* oldBuff){
+
+  printf("Talk request recieved from %s\n", clients[clients_num].name);
 
   //test data
   clients[numClients].ip = "111.222.333.444";
   clients[numClients].name = "client";
   clients[numClients].inCall = 0;
+  clients[numClients].fd = 1;
   numClients++;
   //test data
 
@@ -292,7 +297,7 @@ void talk(int clients_num, int fd, char* oldBuff){
   //
   // cut 'talk ', save client name to buff
   //
-  int flag = 0, i = 0, j = strlen(TALK) + 1;
+  int client_index = 0, i = 0, j = strlen(TALK) + 1;
 
   //Hey! Look at that! (This copies the old buffer into the new buffer, Null terminates the loop.)
   while((buff[i++] = oldBuff[j++])){}
@@ -304,30 +309,60 @@ void talk(int clients_num, int fd, char* oldBuff){
   for(i = 0; i < numClients; i++){
     if(i == clients_num){continue;}
     int ret = strcmp(buff, clients[i].name);
-    printf("%i\n", ret);
 
     //client found
     if(ret == 0){
-      flag++;
-      write(fd, "yo\n", 3);
+      client_index = i;
+      break;
     }
   }
 
   //Was a client found?
   //Yes! Client found!
-  if(flag){
+  if(client_index){
+    if(clients[client_index].inCall != 0){
+      write(clients[clients_num].fd, clients[client_index].name, strlen(clients[client_index].name));
+      write(clients[clients_num].fd, " is in Talk session. Request Denied.\n", strlen(" is in Talk session. Request Denied.\n"));
+
+    }else{
+      printf("Sending Talk Request to %s\n", buff);
+      write(clients[client_index].fd, "Talk request from ", strlen("Talk request from "));
+      write(clients[client_index].fd, clients[clients_num].name, strlen(clients[clients_num].name));
+      write(clients[client_index].fd, "@", 1);
+      write(clients[client_index].fd, clients[clients_num].ip, strlen(clients[clients_num].ip));
+      write(clients[client_index].fd, ". Respond with \"accept ", strlen(". Respond with \"accept "));
+      write(clients[client_index].fd, clients[clients_num].name, strlen(clients[clients_num].name));
+      write(clients[client_index].fd, "@", 1);
+      write(clients[client_index].fd, clients[clients_num].ip, strlen(clients[clients_num].ip));
+      write(clients[client_index].fd, "\"\n", 2);
+
+      printf("Sending Ring Message to %s\n", clients[clients_num].name);
+      write(clients[clients_num].fd, "Ringing ", strlen("ringing "));
+      write(clients[clients_num].fd, clients[client_index].name, strlen(clients[client_index].name));
+      write(clients[clients_num].fd, "\n", 1);
+
+
+
+
+    }
+
+
+
+
+
+
 
   //No clients here! Return to accepted_client
   }else{
-    write(fd, buff, strlen(buff));
-    write(fd, NOT_LOGGED_IN, strlen(NOT_LOGGED_IN));
+    write(clients[clients_num].fd, buff, strlen(buff));
+    write(clients[clients_num].fd, NOT_LOGGED_IN, strlen(NOT_LOGGED_IN));
   }
 
 }
-void conf_talk(int clients_num, int fd, char* oldBuff){
+void conf_talk(int clients_num, char* oldBuff){
   char buff[BUFFSIZE];
   int i = 0;
   int j = strlen(CONF_TALK) + 1;
   while((buff[i++] = oldBuff[j++])){}
-  write(fd, buff, strlen(buff));
+  write(clients[clients_num].fd, buff, strlen(buff));
 }
